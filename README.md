@@ -11,7 +11,13 @@ A combo of a small **plugin** (handles the breeding logic) and a **data pack** (
 1. **Eat wheat** (the data pack makes plain wheat edible).
 2. You enter **love mode** (hearts) — like an animal ready to breed.
 3. Stand near another willing animal, mob or player and breeding triggers.
-4. Player + player produces a baby tagged `<nick> junior` wearing the parent's head.
+
+The baby is named **`<nick> Junior`** (visible name tag) and:
+
+- **Player + Player** → a small humanoid **mini-player** baby wearing the parent's head (the head sits correctly on its head).
+- **Player + Animal** (the animal must also be in love mode) → a **baby of that animal**, named after the player.
+
+Breeding also **drops a little XP** (1–7) and puts the player (and the animal) on a **5-minute cooldown**, just like vanilla animal breeding.
 
 ## Components
 

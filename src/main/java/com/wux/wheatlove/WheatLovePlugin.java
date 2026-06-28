@@ -3,6 +3,7 @@ package com.wux.wheatlove;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Random;
 import java.util.UUID;
 
 import org.bukkit.Bukkit;
@@ -10,17 +11,16 @@ import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.Particle;
 import org.bukkit.Sound;
-import org.bukkit.World;
 import org.bukkit.entity.Ageable;
 import org.bukkit.entity.Animals;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.EntityType;
+import org.bukkit.entity.ExperienceOrb;
 import org.bukkit.entity.Horse;
-import org.bukkit.entity.ItemDisplay;
 import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Player;
 import org.bukkit.entity.Sheep;
-import org.bukkit.entity.Villager;
+import org.bukkit.entity.Zombie;
 import org.bukkit.event.Cancellable;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
@@ -33,32 +33,30 @@ import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitTask;
 import org.bukkit.scoreboard.Objective;
 import org.bukkit.scoreboard.Score;
-import org.bukkit.util.Transformation;
 import org.bukkit.util.Vector;
-import org.joml.Vector3f;
+
+import net.kyori.adventure.text.Component;
 
 /**
  * Wheat Love (combo: datapack + plugin).
  *
- * Flow:
- *  - Eat wheat -> love mode (hearts ~8s). The datapack only makes wheat edible
- *    for players WITHOUT the "wl_loving" tag, and this plugin strips edibility
- *    from wheat held by loving players -> while you have hearts you CANNOT eat.
- *  - Because the held wheat is no longer "usable", right-clicking another player
- *    now fires the interact event -> that player also gets hearts.
- *  - Two hearted entities (player+player => baby villager, player+adult animal in
- *    love mode => baby of that animal) get pulled together and spawn a baby named
- *    "<player> junior" carrying the player's head.
+ * Eat wheat -> love mode (hearts). Right-click another loving player to spread it.
+ * Two loving entities pull together and spawn a baby named "<player> Junior":
+ *  - player + player => a small humanoid baby (mini-player) wearing the parent's head
+ *  - player + animal (also in love mode) => a baby of that animal, named after the player
+ * Breeding drops a little XP and puts the player (and animal) on a cooldown, just like
+ * vanilla animal breeding.
  */
 public class WheatLovePlugin extends JavaPlugin implements Listener {
 
     private final Map<UUID, Long> readyUntilMs = new HashMap<>();
     private final Map<UUID, Long> lastFeedMs = new HashMap<>();
+    private final Map<UUID, Long> breedCooldownUntil = new HashMap<>();
+    private final Random rng = new Random();
     private BukkitTask tickTask;
-    private int sweepCounter = 0;
 
     private static final long LOVE_MS = 8000L;
-    private static final String HEAD_TAG = "wl_head";
+    private static final long COOLDOWN_MS = 300_000L;   // 5 min, stejně jako zvíře
     private static final String LOVE_TAG = "wl_loving";
 
     private static final EnumSet<EntityType> SUPPORTED_ANIMALS = EnumSet.of(
@@ -94,7 +92,6 @@ public class WheatLovePlugin extends JavaPlugin implements Listener {
         readyUntilMs.clear();
     }
 
-    /** While loving, right-click another player to give THEM hearts too. */
     @EventHandler
     public void onInteractEntity(PlayerInteractEntityEvent event) {
         handleFeed(event, event.getPlayer(), event.getRightClicked(), event.getHand());
@@ -112,12 +109,12 @@ public class WheatLovePlugin extends JavaPlugin implements Listener {
         long now = System.currentTimeMillis();
         Long until = readyUntilMs.get(clicker.getUniqueId());
         if (until == null || until < now) {
-            return; // clicker must be in love mode (have hearts) to spread it
+            return;
         }
         event.setCancelled(true);
         Long last = lastFeedMs.get(clicker.getUniqueId());
         if (last != null && now - last < 250) {
-            return; // dedupe: both interact events fire for one click
+            return;
         }
         lastFeedMs.put(clicker.getUniqueId(), now);
         startLove(target, now);
@@ -126,7 +123,6 @@ public class WheatLovePlugin extends JavaPlugin implements Listener {
     private void tickLogic() {
         long now = System.currentTimeMillis();
 
-        // 1) Detect wheat eaten (datapack sets scoreboard wl_eat=1 on consume).
         Objective obj = Bukkit.getScoreboardManager() == null ? null
             : Bukkit.getScoreboardManager().getMainScoreboard().getObjective("wl_eat");
         if (obj != null) {
@@ -139,7 +135,6 @@ public class WheatLovePlugin extends JavaPlugin implements Listener {
             }
         }
 
-        // 2) Love mode: block eating (strip wheat), pull toward partner, spawn baby.
         for (Player p : Bukkit.getOnlinePlayers()) {
             Long until = readyUntilMs.get(p.getUniqueId());
             if (until == null || until < now || p.isDead()) {
@@ -152,45 +147,45 @@ public class WheatLovePlugin extends JavaPlugin implements Listener {
             stripWheatEdibility(p);
             spawnHearts(p.getLocation().add(0, 1.8, 0), 2);
 
-            // Player + player => baby villager
+            // Player + player => mini-player baby
             Player partner = findNearestReadyPlayer(p, 8.0);
             if (partner != null) {
                 moveTowardsEachOther(p, partner, 0.07);
                 spawnHearts(partner.getLocation().add(0, 1.8, 0), 2);
                 if (p.getLocation().distanceSquared(partner.getLocation()) <= (1.8 * 1.8)) {
-                    spawnBaby(midpoint(p.getLocation(), partner.getLocation()), EntityType.VILLAGER, p, null);
+                    spawnBaby(midpoint(p.getLocation(), partner.getLocation()), EntityType.ZOMBIE, p, null, true);
+                    breedCooldownUntil.put(p.getUniqueId(), now + COOLDOWN_MS);
+                    breedCooldownUntil.put(partner.getUniqueId(), now + COOLDOWN_MS);
                     endLove(p);
                     endLove(partner);
                 }
                 continue;
             }
 
-            // Player + mob => only if the animal is ALSO in love mode (fed wheat).
+            // Player + animal (animal must also be in love mode)
             Animals animal = findNearestLoveAnimal(p, 8.0);
             if (animal != null) {
                 moveTowardsEachOther(p, animal, 0.07);
                 spawnHearts(animal.getLocation().add(0, 1.0, 0), 3);
                 if (p.getLocation().distanceSquared(animal.getLocation()) <= (2.0 * 2.0)) {
-                    spawnBaby(midpoint(p.getLocation(), animal.getLocation()), animal.getType(), p, animal);
-                    endLove(p);
-                }
-            }
-        }
-
-        // 3) Periodic cleanup of orphaned head displays (every ~5s).
-        if (++sweepCounter >= 100) {
-            sweepCounter = 0;
-            for (World w : Bukkit.getWorlds()) {
-                for (ItemDisplay d : w.getEntitiesByClass(ItemDisplay.class)) {
-                    if (d.getScoreboardTags().contains(HEAD_TAG) && d.getVehicle() == null) {
-                        d.remove();
+                    spawnBaby(midpoint(p.getLocation(), animal.getLocation()), animal.getType(), p, animal, false);
+                    breedCooldownUntil.put(p.getUniqueId(), now + COOLDOWN_MS);
+                    animal.setLoveModeTicks(0);
+                    if (animal instanceof Ageable aa) {
+                        aa.setAge(6000);   // zvíře dostane normální breed cooldown
                     }
+                    endLove(p);
                 }
             }
         }
     }
 
     private void startLove(Player p, long now) {
+        Long cd = breedCooldownUntil.get(p.getUniqueId());
+        if (cd != null && cd > now) {
+            p.sendActionBar(Component.text("Jeste jsi unaveny po pareni (" + ((cd - now) / 1000) + "s)"));
+            return;
+        }
         readyUntilMs.put(p.getUniqueId(), now + LOVE_MS);
         p.addScoreboardTag(LOVE_TAG);
         stripWheatEdibility(p);
@@ -203,7 +198,6 @@ public class WheatLovePlugin extends JavaPlugin implements Listener {
         p.removeScoreboardTag(LOVE_TAG);
     }
 
-    /** Replace held wheat that carries food/consumable components with plain wheat (cannot be eaten). */
     private void stripWheatEdibility(Player p) {
         ItemStack main = p.getInventory().getItemInMainHand();
         if (main.getType() == Material.WHEAT && main.hasItemMeta() && main.getItemMeta().hasFood()) {
@@ -258,7 +252,6 @@ public class WheatLovePlugin extends JavaPlugin implements Listener {
         return best;
     }
 
-    /** Pull both entities toward each other, horizontal only (no launching). */
     private void moveTowardsEachOther(LivingEntity a, LivingEntity b, double strength) {
         Vector dir = b.getLocation().toVector().subtract(a.getLocation().toVector());
         dir.setY(0);
@@ -270,7 +263,7 @@ public class WheatLovePlugin extends JavaPlugin implements Listener {
         b.setVelocity(b.getVelocity().multiply(0.6).add(unit.multiply(-strength)));
     }
 
-    private void spawnBaby(Location loc, EntityType type, Player namedAfter, Animals source) {
+    private void spawnBaby(Location loc, EntityType type, Player namedAfter, Animals source, boolean playerBaby) {
         Entity e = loc.getWorld().spawnEntity(loc, type);
         if (e instanceof Ageable ageable) {
             ageable.setBaby();
@@ -283,33 +276,36 @@ public class WheatLovePlugin extends JavaPlugin implements Listener {
         if (e instanceof Sheep lamb && source instanceof Sheep parentSheep) {
             lamb.setColor(parentSheep.getColor());
         }
-        if (e instanceof LivingEntity le) {
-            le.customName(net.kyori.adventure.text.Component.text(namedAfter.getName() + " junior"));
-            le.setCustomNameVisible(true);
-            attachPlayerHead(le, namedAfter);
+        if (playerBaby && e instanceof Zombie z) {
+            z.setBaby();                       // malé (humanoidní) tělo
+            z.setShouldBurnInDay(false);       // nehoří na slunci
+            z.setAware(false);                 // pasivní - neútočí na rodiče
+            z.setRemoveWhenFarAway(false);     // nezmizí
+            if (z.getEquipment() != null) {
+                z.getEquipment().setHelmet(playerHeadItem(namedAfter));  // hlava SEDÍ na humanoidní hlavě
+                z.getEquipment().setHelmetDropChance(0f);
+            }
         }
+        if (e instanceof LivingEntity le) {
+            le.customName(Component.text(namedAfter.getName() + " Junior"));
+            le.setCustomNameVisible(true);
+        }
+        // XP jako při normálním množení (1-7)
+        ExperienceOrb orb = loc.getWorld().spawn(loc.clone().add(0, 0.4, 0), ExperienceOrb.class);
+        orb.setExperience(1 + rng.nextInt(7));
+
         spawnHearts(loc.clone().add(0, 1.0, 0), 14);
         loc.getWorld().playSound(loc, Sound.ENTITY_PLAYER_LEVELUP, 0.6f, 1.6f);
     }
 
-    /** Animals/villagers don't render helmet equipment, so use a rideable head display. */
-    private void attachPlayerHead(LivingEntity baby, Player player) {
+    private ItemStack playerHeadItem(Player player) {
         ItemStack head = new ItemStack(Material.PLAYER_HEAD);
         SkullMeta sm = (SkullMeta) head.getItemMeta();
         if (sm != null) {
             sm.setOwningPlayer(player);
             head.setItemMeta(sm);
         }
-        ItemDisplay disp = (ItemDisplay) baby.getWorld().spawnEntity(baby.getLocation(), EntityType.ITEM_DISPLAY);
-        disp.setItemStack(head);
-        disp.setItemDisplayTransform(ItemDisplay.ItemDisplayTransform.HEAD);
-        disp.setTransformation(new Transformation(
-            new Vector3f(0f, 0.35f, 0f),
-            disp.getTransformation().getLeftRotation(),
-            new Vector3f(1f, 1f, 1f),
-            disp.getTransformation().getRightRotation()));
-        disp.addScoreboardTag(HEAD_TAG);
-        baby.addPassenger(disp);
+        return head;
     }
 
     private Location midpoint(Location a, Location b) {
