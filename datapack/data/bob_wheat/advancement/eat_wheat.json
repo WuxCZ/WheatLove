@@ -1,0 +1,15 @@
+{
+  "criteria": {
+    "eat_wheat": {
+      "trigger": "minecraft:consume_item",
+      "conditions": {
+        "item": {
+          "items": "minecraft:wheat"
+        }
+      }
+    }
+  },
+  "rewards": {
+    "function": "bob_wheat:on_wheat_eat"
+  }
+}

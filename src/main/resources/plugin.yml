@@ -1,0 +1,6 @@
+name: WheatLovePlugin
+main: com.wux.wheatlove.WheatLovePlugin
+version: 1.0.0
+api-version: '1.21'
+author: Wux
+description: Player+mob and player+player wheat breeding mechanics

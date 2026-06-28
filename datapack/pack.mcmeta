@@ -1,0 +1,7 @@
+{
+  "pack": {
+    "description": "Bob Wheat Love: eat wheat to trigger heart breeding (plugin handles breeding)",
+    "min_format": [101, 1],
+    "max_format": [101, 1]
+  }
+}
